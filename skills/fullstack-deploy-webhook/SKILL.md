@@ -3,10 +3,10 @@ name: easy-setup-webhook-production
 description: Add a deploy webhook endpoint to any Laravel or Node.js (Express + PM2) backend + frontend project. Use when the user asks to "add deploy webhook", "deploy endpoint", "auto deploy", "setup PM2 deploy", "webhook para deployar", "agregar deploy webhook", or similar. Implements git pull + conditional builds with security (throttle, ban, token validation) and battle-tested gotchas (safe.directory, PATH, permissions, PM2 reload).
 metadata:
   author: maxirodr
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
-# Easy Setup Webhook Production v1.0 — Multi-Stack Wizard
+# Easy Setup Webhook Production v1.1 — Multi-Stack Wizard
 
 Skill to add a secure, production-ready deploy webhook endpoint to any **Laravel** or **Node.js (Express + PM2)** backend with one or more frontends. The endpoint does a git pull and conditionally runs builds based on which files actually changed.
 
@@ -72,14 +72,35 @@ Ask the user (showing detected defaults):
 
 Store as `spec.frontends[]` with shape: `{ dir, pkg_manager, build_cmd, output_dir }`.
 
-### Step 1.4 — Server Environment
+### Step 1.4 — Server Environment & URL Detection
 
 Ask:
 
-1. **Server user**:
-   - Laravel default: `www-data`
-   - Node.js default: suggest a dedicated user or current user. Confirm.
-2. **Web server**: nginx, apache, or none (Node.js can serve directly). Confirm.
+1. **Web server**: nginx, apache, or none (Node.js can serve directly). Confirm.
+2. **Server user** (for SSH access): Who do they SSH as? (root, deploy user, etc.)
+3. **Laravel public URL path** (Laravel only — CRITICAL):
+   - **Do NOT assume** the URL structure. Different nginx configs serve Laravel at different paths.
+   - Ask the user: "What is the base URL of your Laravel API? For example, if your health check is at `https://example.com/api/health`, the base URL is `https://example.com`."
+   - Alternatively, ask them to run: `grep -A5 "try_files.*index.php" /etc/nginx/sites-enabled/*` to detect the nginx location block that serves Laravel.
+   - Common patterns:
+     - `location /` → `https://domain.com/api/deploy`
+     - `location /apilaravel/public` → `https://domain.com/apilaravel/public/api/deploy`
+     - `location /api` → `https://domain.com/api/deploy` (with different prefix config)
+   - Store as `spec.laravel.public_url_base`
+4. **PHP-FPM user** (Laravel only — CRITICAL):
+   - **IMPORTANT**: For Laravel, the "server user" (SSH user) is NOT the user that runs the deploy. PHP-FPM runs as its own user (typically `www-data` on Debian/Ubuntu, `nginx` on CentOS/RHEL).
+   - Detect by asking the user to run: `ps aux | grep php-fpm | grep -v root | head -1 | awk '{print $1}'`
+   - Or check PHP-FPM pool config: `grep -r "^user" /etc/php/*/fpm/pool.d/`
+   - **Explain to the user**: "PHP-FPM (which executes your Laravel code) runs as a specific system user, usually `www-data`. This user needs permission to run `git pull` and write to the project directory. This is different from the user you SSH with."
+   - Store as `spec.laravel.fpm_user`
+5. **Node.js process user** (Node.js only): What user runs PM2? Suggest current user or dedicated deploy user.
+6. **Node.js/npm path on the server** (if frontends exist — CRITICAL):
+   - Ask the user to run on the server: `which npm`
+   - If the path contains `.nvm` (e.g., `/root/.nvm/versions/node/v20.19.5/bin/npm`), record:
+     - `spec.nvm_bin_path` = the directory (e.g., `/root/.nvm/versions/node/v20.19.5/bin`)
+     - `spec.nvm_home_dir` = the home dir containing `.nvm` (e.g., `/root`)
+   - If npm is in `/usr/bin/` or `/usr/local/bin/`, no special handling needed.
+   - **Explain to the user**: "I need to know where npm is installed on your server because PHP-FPM doesn't have the same PATH as your shell. If npm is installed via nvm, I'll need to hardcode the path."
 
 ### Step 1.5 — Confirm Spec Before Generating
 
@@ -298,8 +319,12 @@ class DeployController extends Controller
     {
         try {
             $env = getenv();
-            // Add node_modules/.bin to PATH so npm scripts find tsc, vite, etc.
+            // Add nvm (if applicable) + node_modules/.bin to PATH so npm scripts find tsc, vite, etc.
+            // {NVM_PATH_LINE} — only include if nvm detected during wizard (e.g., $nvmBin = '/root/.nvm/versions/node/vXX/bin';)
             $env['PATH'] = $cwd . '/node_modules/.bin:' . ($env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin');
+            // Set npm cache + HOME to /tmp so www-data can write without permission issues
+            $env['npm_config_cache'] = '/tmp/.npm-deploy-cache';
+            $env['HOME'] = '/tmp';
 
             $process = new Process($command, $cwd, $env);
             $process->setTimeout($timeout);
@@ -741,20 +766,94 @@ The `git_token` is a GitHub Personal Access Token (classic) with `repo` scope. I
 - Successful auth resets the throttle counter
 - The GitHub PAT is passed per-request, not stored
 
-### Laravel-Specific Instructions
+### Laravel-Specific Instructions — Complete Server Setup Checklist
+
+**Present this as a numbered step-by-step guide to the user. ALL steps must be completed BEFORE testing the deploy endpoint.**
+
+```
+╔══════════════════════════════════════════════════════════╗
+║       SERVER SETUP CHECKLIST (run all on the server)     ║
+╠══════════════════════════════════════════════════════════╣
+║ 1. Set .env variables                                    ║
+║ 2. Give PHP-FPM user ownership of project                ║
+║ 3. Fix nvm permissions (if applicable)                   ║
+║ 4. Clear Laravel cache                                   ║
+║ 5. Test the deploy URL                                   ║
+╚══════════════════════════════════════════════════════════╝
+```
+
+**Step 1 — Set .env variables:**
+```bash
+cd /path/to/laravel
+# Add these to .env (or edit with nano .env):
+# DEPLOY_TOKEN=<output of: openssl rand -hex 32>
+# DEPLOY_GIT_USER={detected_git_user}
+# DEPLOY_GIT_REPO={detected_git_repo}
+```
+
+**Step 2 — Give PHP-FPM user ownership of project:**
+
+**CRITICAL: File Permissions for PHP-FPM**
+
+PHP-FPM runs as its own user (detected during setup as `{FPM_USER}`, typically `www-data`). This is NOT the same as the user you SSH with. The deploy webhook runs inside PHP-FPM, so `{FPM_USER}` needs to:
+- Read/write the `.git` directory (for `git pull`)
+- Write to project files (for builds, cache, logs)
 
 ```bash
-# Ensure www-data owns the entire project directory
-sudo chown -R www-data:www-data /path/to/project
+# 1. Check which user PHP-FPM runs as (should match what we detected)
+ps aux | grep php-fpm | grep -v root | head -1 | awk '{print $1}'
 
-# Set up .env on the server
+# 2. Give PHP-FPM user ownership of the project directory
+#    ⚠️  This allows the web server process to read/write ALL project files.
+#    This is REQUIRED for the deploy webhook to work (git pull, npm ci, builds).
+#    If you're uncomfortable with this, consider a cron-based deploy approach instead.
+sudo chown -R {FPM_USER}:{FPM_USER} /path/to/project
+
+# 3. Set up .env on the server
 cp .env.example .env
 php artisan key:generate
 # Edit .env: set DEPLOY_TOKEN, DEPLOY_GIT_USER, DEPLOY_GIT_REPO
 
-# Clear cache after first setup
+# 4. Clear cache after first setup
 php artisan optimize:clear
 ```
+
+**Why `chown` is needed**: When you trigger the deploy webhook via HTTP, the code runs as `{FPM_USER}` (not as root or your SSH user). Git requires write access to `.git/` for `git pull`, and npm/composer need write access for installing dependencies. Without `chown`, you'll get "Permission denied" errors.
+
+**Step 3 — Fix nvm permissions (ONLY if npm is installed via nvm):**
+
+If `which npm` on the server returns a path containing `.nvm` (e.g., `/root/.nvm/versions/node/v20/bin/npm`), the PHP-FPM user needs permission to traverse the home directory and execute the binaries:
+
+```bash
+# Allow www-data to traverse /root/ without listing its contents
+chmod 711 /root
+
+# Allow www-data to execute npm/node binaries
+chmod -R 755 /root/.nvm/versions/node/{VERSION}/bin/
+```
+
+Replace `/root` with the actual home directory if nvm is installed under a different user. Replace `{VERSION}` with the actual node version (e.g., `v20.19.5`).
+
+**Why**: Even though we hardcode the nvm path in the deploy code, Linux still requires traverse permission (`x`) on every parent directory. `chmod 711` gives "execute" (traverse) without "read" (list), so www-data can reach `/root/.nvm/...` without seeing other files in `/root/`.
+
+**Step 4 — Clear Laravel cache:**
+```bash
+cd /path/to/laravel
+php artisan optimize:clear
+```
+
+**Step 5 — Test the deploy URL:**
+```bash
+# First test without git_token to verify the endpoint responds:
+curl -s "{DEPLOY_URL}?token=YOUR_TOKEN" | python3 -m json.tool
+# Expected: {"error":"git_token required"} — this means the endpoint works!
+
+# Then test with both tokens:
+curl -s "{DEPLOY_URL}?token=YOUR_TOKEN&git_token=YOUR_GITHUB_PAT" | python3 -m json.tool
+# Expected: {"status":"no_changes",...} or {"status":"completed",...}
+```
+
+If you get a 404, check your nginx config — the URL path depends on how nginx routes to Laravel's `public/index.php`. See Gotcha #3b.
 
 ### Node.js-Specific Instructions
 
@@ -790,17 +889,51 @@ Git refuses to operate in directories owned by a different user. The fix is `git
 #### 2. `node_modules/.bin` in PATH
 Neither Symfony Process (Laravel) nor `execFile` (Node.js) inherits the shell's PATH modifications. npm scripts that call `tsc`, `vite`, `next`, etc. will fail with "command not found" unless you explicitly add `node_modules/.bin` to the PATH.
 
-#### 3. File ownership on the server
-The web server / Node.js process needs to own the project files. If files are owned by another user, both git and the application will have permission issues.
-- **Laravel**: `sudo chown -R www-data:www-data /path/to/project`
-- **Node.js**: `sudo chown -R {server_user}:{server_user} /path/to/project`
+#### 3. File ownership on the server (PHP-FPM user ≠ SSH user)
+The process that executes the deploy webhook needs write access to the project files. **This is NOT the user you SSH with.**
+- **Laravel**: PHP-FPM runs as its own user (typically `www-data` on Debian/Ubuntu). Even if the user SSHs as `root`, the deploy runs as `www-data`. You MUST `chown -R www-data:www-data /path/to/project` or git will fail with "Permission denied" on `.git/FETCH_HEAD`.
+  - Detect PHP-FPM user: `ps aux | grep php-fpm | grep -v root | head -1 | awk '{print $1}'`
+  - Or: `grep -r "^user" /etc/php/*/fpm/pool.d/`
+- **Node.js**: `sudo chown -R {pm2_user}:{pm2_user} /path/to/project`
 
-#### 4. Build timeout: 300 seconds
+**IMPORTANT for the wizard**: When asking "Server user", always clarify that for Laravel the relevant user is the PHP-FPM user, not the SSH user. The wizard MUST detect the PHP-FPM user and guide the user to set `chown` correctly BEFORE testing the deploy endpoint.
+
+#### 3b. Detect the Laravel public URL path from nginx
+Do NOT assume the URL structure. Always ask the user for the base URL of their API or detect it from the nginx config. Common patterns:
+- `location /` with `try_files $uri $uri/ /index.php?$query_string` → API at `/api/deploy`
+- `location /apilaravel/public` → API at `/apilaravel/public/api/deploy`
+- Proxy pass to PHP-FPM on specific path → varies
+
+The wizard should ask the user to confirm the final deploy URL before finishing.
+
+#### 4. Node.js installed via nvm — not in PHP-FPM's PATH
+If Node.js is installed via **nvm** (Node Version Manager), it lives in a user-specific path like `/root/.nvm/versions/node/vXX/bin/` or `/home/user/.nvm/...`. PHP-FPM's `www-data` user does NOT have this in its PATH, so `npm` will fail with "npm: not found".
+- **Detection**: During the wizard, ask the user to run `which npm` on the server. If the path contains `.nvm`, you MUST hardcode that path into the `runCommand` method's PATH env.
+- **Fix in code**: Add the nvm bin path to the process environment: `$env['PATH'] = $nvmBin . ':' . $env['PATH']`
+- **Fix on server — REQUIRED permissions**: Even after adding the path, `www-data` needs permission to traverse the home directory and execute the binaries:
+  ```bash
+  # If nvm is in /root/.nvm/:
+  chmod 711 /root                                          # Allow www-data to traverse /root/ (without listing contents)
+  chmod -R 755 /root/.nvm/versions/node/vXX/bin/           # Allow www-data to execute npm/node
+  ```
+  Without `chmod 711 /root`, www-data gets "Permission denied" even though the path is correct. Without `chmod 755` on the bin dir, www-data can find npm but can't execute it.
+- **Alternative**: Install Node.js system-wide via `apt install nodejs` or use the NodeSource PPA, which puts `npm` in `/usr/bin/` and avoids all these permission issues.
+- **IMPORTANT**: The wizard MUST ask the user for the output of `which npm` on the server and include that path in the generated code. The post-implementation instructions MUST include the chmod commands if nvm is detected.
+
+#### 5. npm cache permission for PHP-FPM / www-data
+When npm runs as `www-data`, it tries to write its cache to `$HOME/.npm` (typically `/var/www/.npm`). This directory may not exist or may be owned by root. Instead of creating it, set the `npm_config_cache` and `HOME` env vars in the process to `/tmp`:
+```php
+$env['npm_config_cache'] = '/tmp/.npm-deploy-cache';
+$env['HOME'] = '/tmp';
+```
+This is cleaner than creating `.npm` directories in `/var/www/`. The wizard MUST include these env vars in the `runCommand` method.
+
+#### 6. Build timeout: 300 seconds
 Frontend builds (especially Next.js) can take 2-5 minutes on small VPS instances. Always set a generous timeout. The default 60-second timeout WILL cause failures.
 
 ### Laravel-Specific
 
-#### 5. Symfony Process `-c` flag: arguments must be separate array elements
+#### 7. Symfony Process `-c` flag: arguments must be separate array elements
 ```php
 // CORRECT:
 ['git', '-c', "safe.directory={$basePath}", 'pull', ...]
@@ -810,13 +943,13 @@ Frontend builds (especially Next.js) can take 2-5 minutes on small VPS instances
 ['git', "-c safe.directory={$basePath}", 'pull', ...]
 ```
 
-#### 6. No `npx` needed in npm scripts
+#### 8. No `npx` needed in npm scripts
 If `package.json` has `"build": "tsc && vite build"`, running `npm run build` will find `tsc` in `node_modules/.bin` automatically. You do NOT need `npx tsc && npx vite build`. But the Symfony Process env still needs the PATH fix from gotcha #2.
 
-#### 7. `--force` flag for migrations
+#### 9. `--force` flag for migrations
 In production, `php artisan migrate` requires the `--force` flag. Without it, the command hangs waiting for user input inside Symfony Process.
 
-#### 8. `composer install` vs `composer update`
+#### 10. `composer install` vs `composer update`
 - `composer install` = **deterministic**, installs exact versions from `composer.lock`. Safe for automated deploys.
 - `composer update` = resolves new dependency versions, may introduce untested code. **Never use in automated deploys.**
 Always use `composer install --no-dev --optimize-autoloader` in deploy webhooks. This is the PHP equivalent of `npm ci` vs `npm install`.
