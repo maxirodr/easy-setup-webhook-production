@@ -1,0 +1,8 @@
+{
+  "owner": "maxirodr",
+  "category": "devops",
+  "tags": ["deploy", "webhook", "laravel", "nodejs", "express", "pm2", "ci-cd", "automation"],
+  "repository": "https://github.com/maxirodr/easy-setup-webhook-production",
+  "screenshots": [],
+  "featured": false
+}
