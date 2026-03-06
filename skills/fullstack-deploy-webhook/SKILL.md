@@ -1,14 +1,18 @@
 ---
 name: easy-setup-webhook-production
-description: Add a deploy webhook endpoint to any Laravel or Node.js (Express + PM2) backend + frontend project. Use when the user asks to "add deploy webhook", "deploy endpoint", "auto deploy", "setup PM2 deploy", "webhook para deployar", "agregar deploy webhook", or similar. Implements git pull + conditional builds with security (throttle, ban, token validation) and battle-tested gotchas (safe.directory, PATH, permissions, PM2 reload).
+description: Add or update a deploy webhook endpoint for Laravel or Node.js (Express + PM2) backend + frontend projects. Use when the user asks to "add deploy webhook", "deploy endpoint", "auto deploy", "setup PM2 deploy", "webhook para deployar", "agregar deploy webhook", "update deploy webhook", "upgrade deploy webhook", "actualizar deploy webhook", "actualizar webhook", or similar. Implements git pull + conditional builds with security (throttle, ban, token validation) and battle-tested gotchas (safe.directory, PATH, permissions, PM2 reload).
 metadata:
   author: maxirodr
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
-# Easy Setup Webhook Production v1.1 — Multi-Stack Wizard
+# Easy Setup Webhook Production v1.2 — Multi-Stack Wizard
 
 Skill to add a secure, production-ready deploy webhook endpoint to any **Laravel** or **Node.js (Express + PM2)** backend with one or more frontends. The endpoint does a git pull and conditionally runs builds based on which files actually changed.
+
+**Two modes:**
+- **New installation** (Phases 1–4): Full interactive wizard. Use when there's no deploy webhook in the project.
+- **Update existing installation** (Phase 5): Upgrades a v1.0/v1.1 installation to v1.2. Use when the user says "update", "upgrade", or "actualizar" the deploy webhook.
 
 ---
 
@@ -360,6 +364,7 @@ if ($hasChangesIn('{dir}/') && is_dir(${varName}Path)) {
         {INSTALL_CMD_ARRAY},
         ${varName}Path
     );
+    {AUDIT_FIX_BLOCK}
     $results['{key}_build'] = $this->runCommand(
         ['{pkg_manager}', 'run', 'build'],
         ${varName}Path,
@@ -378,6 +383,45 @@ Resolve `{INSTALL_CMD_ARRAY}` per package manager — each argument MUST be a se
 - **yarn**: `['yarn', 'install', '--frozen-lockfile']`
 - **pnpm**: `['pnpm', 'install', '--frozen-lockfile']`
 - **bun**: `['bun', 'install', '--frozen-lockfile']`
+
+Resolve `{AUDIT_FIX_BLOCK}` per package manager — only npm and pnpm support `audit fix`. The `npm install` only runs if `audit fix` actually modified `package.json` or the lockfile (detected via `md5_file`):
+
+**For npm:**
+```php
+    // Check for vulnerabilities and fix if found
+    $auditResult = $this->runCommand(['npm', 'audit'], ${varName}Path);
+    if (!$auditResult['success']) {
+        $pkgHash = md5_file(${varName}Path . '/package.json');
+        $lockFile = ${varName}Path . '/package-lock.json';
+        $lockHash = file_exists($lockFile) ? md5_file($lockFile) : null;
+        $results['{key}_audit_fix'] = $this->runCommand(['npm', 'audit', 'fix'], ${varName}Path);
+        if (md5_file(${varName}Path . '/package.json') !== $pkgHash
+            || (file_exists($lockFile) ? md5_file($lockFile) : null) !== $lockHash) {
+            $results['{key}_reinstall'] = $this->runCommand(['npm', 'install'], ${varName}Path);
+        }
+    }
+```
+
+**For pnpm:**
+```php
+    // Check for vulnerabilities and fix if found
+    $auditResult = $this->runCommand(['pnpm', 'audit'], ${varName}Path);
+    if (!$auditResult['success']) {
+        $pkgHash = md5_file(${varName}Path . '/package.json');
+        $lockFile = ${varName}Path . '/pnpm-lock.yaml';
+        $lockHash = file_exists($lockFile) ? md5_file($lockFile) : null;
+        $results['{key}_audit_fix'] = $this->runCommand(['pnpm', 'audit', 'fix'], ${varName}Path);
+        if (md5_file(${varName}Path . '/package.json') !== $pkgHash
+            || (file_exists($lockFile) ? md5_file($lockFile) : null) !== $lockHash) {
+            $results['{key}_reinstall'] = $this->runCommand(['pnpm', 'install'], ${varName}Path);
+        }
+    }
+```
+
+**For yarn/bun:** Replace `{AUDIT_FIX_BLOCK}` with an empty comment:
+```php
+    // (No audit fix — not supported by {pkg_manager})
+```
 
 ### Step 2A.2 — Add Route
 
@@ -576,6 +620,7 @@ router.get('/', async (req, res) => {
     // 4. Backend: install deps if package.json or lockfile changed
     if (hasChangesIn('package') || hasChangesIn('{LOCK_FILE_PREFIX}')) {
         results.backend_install = await runCommand('{pkg_manager}', [{INSTALL_ARGS}], basePath);
+        {BACKEND_AUDIT_FIX_BLOCK}
     } else {
         results.backend_install = { skipped: true, reason: 'no changes in package/lock files' };
     }
@@ -634,6 +679,49 @@ If `spec.nodejs.typescript === false`, replace `{TS_BUILD_BLOCK}` with an empty 
 // (No TypeScript build — plain JS project)
 ```
 
+#### Backend Audit Fix Block
+
+Resolve `{BACKEND_AUDIT_FIX_BLOCK}` per package manager — only npm and pnpm support `audit fix`. The reinstall only runs if `audit fix` actually modified `package.json` or the lockfile:
+
+**For npm:**
+```js
+        // Check for vulnerabilities and fix if found
+        const backendAudit = await runCommand('npm', ['audit'], basePath);
+        if (!backendAudit.success) {
+            const pkgBefore = fs.readFileSync(path.join(basePath, 'package.json'), 'utf8');
+            const lockPath = path.join(basePath, 'package-lock.json');
+            const lockBefore = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+            results.backend_audit_fix = await runCommand('npm', ['audit', 'fix'], basePath);
+            const pkgAfter = fs.readFileSync(path.join(basePath, 'package.json'), 'utf8');
+            const lockAfter = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+            if (pkgBefore !== pkgAfter || lockBefore !== lockAfter) {
+                results.backend_reinstall = await runCommand('npm', ['install'], basePath);
+            }
+        }
+```
+
+**For pnpm:**
+```js
+        // Check for vulnerabilities and fix if found
+        const backendAudit = await runCommand('pnpm', ['audit'], basePath);
+        if (!backendAudit.success) {
+            const pkgBefore = fs.readFileSync(path.join(basePath, 'package.json'), 'utf8');
+            const lockPath = path.join(basePath, 'pnpm-lock.yaml');
+            const lockBefore = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+            results.backend_audit_fix = await runCommand('pnpm', ['audit', 'fix'], basePath);
+            const pkgAfter = fs.readFileSync(path.join(basePath, 'package.json'), 'utf8');
+            const lockAfter = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+            if (pkgBefore !== pkgAfter || lockBefore !== lockAfter) {
+                results.backend_reinstall = await runCommand('pnpm', ['install'], basePath);
+            }
+        }
+```
+
+**For yarn/bun:** Replace `{BACKEND_AUDIT_FIX_BLOCK}` with an empty comment:
+```js
+        // (No audit fix — not supported by {pkg_manager})
+```
+
 #### TypeScript Variant
 
 If the project uses TypeScript, generate `routes/deploy.ts` instead with proper imports:
@@ -657,6 +745,7 @@ Replace `{FRONTEND_BLOCKS}` with one block per frontend from the spec:
 const {varName}Path = path.join(basePath, '{dir}');
 if (hasChangesIn('{dir}/') && fs.existsSync({varName}Path)) {
     results.{key}_install = await runCommand('{pkg_manager}', [{install_args}], {varName}Path);
+    {AUDIT_FIX_BLOCK}
     results.{key}_build = await runCommand(
         '{pkg_manager}',
         ['run', 'build'],
@@ -669,6 +758,47 @@ if (hasChangesIn('{dir}/') && fs.existsSync({varName}Path)) {
 } else {
     results.{key} = { skipped: true, reason: 'no changes in {dir}/' };
 }
+```
+
+Resolve `{AUDIT_FIX_BLOCK}` per package manager — only npm and pnpm support `audit fix`. The reinstall only runs if `audit fix` actually modified `package.json` or the lockfile:
+
+**For npm:**
+```js
+    // Check for vulnerabilities and fix if found
+    const {varName}Audit = await runCommand('npm', ['audit'], {varName}Path);
+    if (!{varName}Audit.success) {
+        const pkgBefore = fs.readFileSync(path.join({varName}Path, 'package.json'), 'utf8');
+        const lockPath = path.join({varName}Path, 'package-lock.json');
+        const lockBefore = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+        results.{key}_audit_fix = await runCommand('npm', ['audit', 'fix'], {varName}Path);
+        const pkgAfter = fs.readFileSync(path.join({varName}Path, 'package.json'), 'utf8');
+        const lockAfter = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+        if (pkgBefore !== pkgAfter || lockBefore !== lockAfter) {
+            results.{key}_reinstall = await runCommand('npm', ['install'], {varName}Path);
+        }
+    }
+```
+
+**For pnpm:**
+```js
+    // Check for vulnerabilities and fix if found
+    const {varName}Audit = await runCommand('pnpm', ['audit'], {varName}Path);
+    if (!{varName}Audit.success) {
+        const pkgBefore = fs.readFileSync(path.join({varName}Path, 'package.json'), 'utf8');
+        const lockPath = path.join({varName}Path, 'pnpm-lock.yaml');
+        const lockBefore = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+        results.{key}_audit_fix = await runCommand('pnpm', ['audit', 'fix'], {varName}Path);
+        const pkgAfter = fs.readFileSync(path.join({varName}Path, 'package.json'), 'utf8');
+        const lockAfter = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+        if (pkgBefore !== pkgAfter || lockBefore !== lockAfter) {
+            results.{key}_reinstall = await runCommand('pnpm', ['install'], {varName}Path);
+        }
+    }
+```
+
+**For yarn/bun:** Replace `{AUDIT_FIX_BLOCK}` with an empty comment:
+```js
+    // (No audit fix — not supported by {pkg_manager})
 ```
 
 ### Step 2B.2 — Register Route in Express App
@@ -718,12 +848,12 @@ module.exports = {
 
 When generating frontend blocks in either Laravel or Node.js templates, use the correct commands per package manager:
 
-| Package Manager | Install Command          | Run Build         |
-|-----------------|--------------------------|-------------------|
-| `npm`           | `npm ci`                 | `npm run build`   |
-| `yarn`          | `yarn install --frozen-lockfile` | `yarn run build` |
-| `pnpm`          | `pnpm install --frozen-lockfile` | `pnpm run build` |
-| `bun`           | `bun install --frozen-lockfile`  | `bun run build`  |
+| Package Manager | Install Command          | Run Build         | Audit Fix Support |
+|-----------------|--------------------------|-------------------|-------------------|
+| `npm`           | `npm ci`                 | `npm run build`   | Yes (`npm audit fix` → `npm install`) |
+| `yarn`          | `yarn install --frozen-lockfile` | `yarn run build` | No |
+| `pnpm`          | `pnpm install --frozen-lockfile` | `pnpm run build` | Yes (`pnpm audit fix` → `pnpm install`) |
+| `bun`           | `bun install --frozen-lockfile`  | `bun run build`  | No |
 
 **For Laravel (Symfony Process)**, the command array splits differently:
 - `npm`: `['npm', 'ci']` / `['npm', 'run', 'build']`
@@ -731,11 +861,19 @@ When generating frontend blocks in either Laravel or Node.js templates, use the 
 - `pnpm`: `['pnpm', 'install', '--frozen-lockfile']` / `['pnpm', 'run', 'build']`
 - `bun`: `['bun', 'install', '--frozen-lockfile']` / `['bun', 'run', 'build']`
 
+**Audit fix commands (Laravel)** — only for npm/pnpm:
+- `npm`: `['npm', 'audit']` → `['npm', 'audit', 'fix']` → `['npm', 'install']`
+- `pnpm`: `['pnpm', 'audit']` → `['pnpm', 'audit', 'fix']` → `['pnpm', 'install']`
+
 **For Node.js (execFile)**, the command splits as:
 - `npm`: `runCommand('npm', ['ci'], ...)` / `runCommand('npm', ['run', 'build'], ...)`
 - `yarn`: `runCommand('yarn', ['install', '--frozen-lockfile'], ...)` / `runCommand('yarn', ['run', 'build'], ...)`
 - `pnpm`: `runCommand('pnpm', ['install', '--frozen-lockfile'], ...)` / `runCommand('pnpm', ['run', 'build'], ...)`
 - `bun`: `runCommand('bun', ['install', '--frozen-lockfile'], ...)` / `runCommand('bun', ['run', 'build'], ...)`
+
+**Audit fix commands (Node.js)** — only for npm/pnpm:
+- `npm`: `runCommand('npm', ['audit'], ...)` → `runCommand('npm', ['audit', 'fix'], ...)` → `runCommand('npm', ['install'], ...)`
+- `pnpm`: `runCommand('pnpm', ['audit'], ...)` → `runCommand('pnpm', ['audit', 'fix'], ...)` → `runCommand('pnpm', ['install'], ...)`
 
 **Build timeout**: Always 300 seconds (5 minutes) for frontend builds. Small VPS instances can take 2-5 minutes for Next.js builds.
 
@@ -877,6 +1015,158 @@ echo 'deploy-security.json' >> .gitignore
 
 ---
 
+## Phase 5: Update Existing Installations (v1.1 → v1.2)
+
+Use this phase when the user already has a deploy webhook installed and wants to upgrade. The update adds the **npm audit fix** feature (auto-fix vulnerabilities after install, before build).
+
+**CRITICAL: Do NOT run the full wizard (Phases 1–4). Only modify the existing deploy file.**
+
+### Step 5.1 — Find Existing Deploy File
+
+**Laravel:**
+1. Search for `DeployController.php` recursively in `app/Http/Controllers/`
+2. Confirm it contains the deploy logic (look for `runCommand` method and `git_pull` key)
+
+**Node.js:**
+1. Check for `routes/deploy.js` or `routes/deploy.ts`
+2. Confirm it contains the deploy logic (look for `runCommand` function and `git_pull` key)
+
+If no deploy file is found, inform the user and suggest running the full wizard (Phases 1–4) instead.
+
+### Step 5.2 — Check if Already Updated
+
+Search the deploy file for `audit_fix` or `audit`. If found, the installation already has the v1.2 feature. Inform the user: "Your deploy webhook already has the audit fix feature. No update needed."
+
+### Step 5.3 — Detect Frontend Blocks & Package Managers
+
+Read the entire deploy file and identify all frontend blocks by looking for the install→build pattern.
+
+#### Laravel — Pattern to find:
+
+Each frontend block has this structure (variable names and keys vary per project):
+
+```php
+$results['XXXXX_install'] = $this->runCommand(
+    ['PACKAGE_MANAGER', ...],
+    $XXXXXPath
+);
+$results['XXXXX_build'] = $this->runCommand(
+```
+
+Extract from each block:
+- **`$XXXXXPath`** — the variable name (e.g., `$frontendPath`, `$landingPath`, `$adminPath`)
+- **`XXXXX`** — the result key prefix (e.g., `frontend`, `landing`, `admin`)
+- **`PACKAGE_MANAGER`** — the package manager (e.g., `npm`, `yarn`, `pnpm`, `bun`)
+
+#### Node.js — Patterns to find:
+
+**Frontend blocks:**
+```js
+results.XXXXX_install = await runCommand('PACKAGE_MANAGER', [...], XXXXXPath);
+results.XXXXX_build = await runCommand(
+```
+
+**Backend install block:**
+```js
+results.backend_install = await runCommand('PACKAGE_MANAGER', [...], basePath);
+```
+
+Extract the same info: variable name, result key prefix, package manager.
+
+### Step 5.4 — Insert Audit Fix Blocks
+
+For each frontend block found, insert the audit fix code **between** the `_install` and `_build` lines. For the Node.js backend, insert **after** `backend_install` (inside the same `if` block).
+
+**Only insert for npm and pnpm.** For yarn/bun, insert a comment: `// (No audit fix — not supported by {pkg_manager})`
+
+#### Laravel — Insert this block (for npm):
+
+Replace `$VARPath` and `KEY` with the actual variable name and key prefix detected in Step 5.3:
+
+```php
+        // Check for vulnerabilities and fix if found
+        $auditResult = $this->runCommand(['npm', 'audit'], $VARPath);
+        if (!$auditResult['success']) {
+            $pkgHash = md5_file($VARPath . '/package.json');
+            $lockFile = $VARPath . '/package-lock.json';
+            $lockHash = file_exists($lockFile) ? md5_file($lockFile) : null;
+            $results['KEY_audit_fix'] = $this->runCommand(['npm', 'audit', 'fix'], $VARPath);
+            if (md5_file($VARPath . '/package.json') !== $pkgHash
+                || (file_exists($lockFile) ? md5_file($lockFile) : null) !== $lockHash) {
+                $results['KEY_reinstall'] = $this->runCommand(['npm', 'install'], $VARPath);
+            }
+        }
+```
+
+For pnpm, use `pnpm` commands and `pnpm-lock.yaml` as the lockfile.
+
+#### Node.js Frontend — Insert this block (for npm):
+
+Replace `VAR` and `KEY` with the actual variable name and key prefix:
+
+```js
+    // Check for vulnerabilities and fix if found
+    const VARAudit = await runCommand('npm', ['audit'], VARPath);
+    if (!VARAudit.success) {
+        const pkgBefore = fs.readFileSync(path.join(VARPath, 'package.json'), 'utf8');
+        const lockPath = path.join(VARPath, 'package-lock.json');
+        const lockBefore = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+        results.KEY_audit_fix = await runCommand('npm', ['audit', 'fix'], VARPath);
+        const pkgAfter = fs.readFileSync(path.join(VARPath, 'package.json'), 'utf8');
+        const lockAfter = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+        if (pkgBefore !== pkgAfter || lockBefore !== lockAfter) {
+            results.KEY_reinstall = await runCommand('npm', ['install'], VARPath);
+        }
+    }
+```
+
+#### Node.js Backend — Insert after `results.backend_install` (for npm):
+
+```js
+        // Check for vulnerabilities and fix if found
+        const backendAudit = await runCommand('npm', ['audit'], basePath);
+        if (!backendAudit.success) {
+            const pkgBefore = fs.readFileSync(path.join(basePath, 'package.json'), 'utf8');
+            const lockPath = path.join(basePath, 'package-lock.json');
+            const lockBefore = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+            results.backend_audit_fix = await runCommand('npm', ['audit', 'fix'], basePath);
+            const pkgAfter = fs.readFileSync(path.join(basePath, 'package.json'), 'utf8');
+            const lockAfter = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
+            if (pkgBefore !== pkgAfter || lockBefore !== lockAfter) {
+                results.backend_reinstall = await runCommand('npm', ['install'], basePath);
+            }
+        }
+```
+
+For pnpm, use `pnpm` commands and `pnpm-lock.yaml` as the lockfile.
+
+### Step 5.5 — Show Summary
+
+After making changes, show the user:
+
+```
+╔══════════════════════════════════════════════════╗
+║       DEPLOY WEBHOOK UPDATED TO v1.2             ║
+╠══════════════════════════════════════════════════╣
+║ File modified: {path to deploy file}             ║
+║ Audit fix blocks added: {count}                  ║
+║ Package managers detected: {list}                ║
+╠══════════════════════════════════════════════════╣
+║ NEW BEHAVIOR                                     ║
+║ After npm ci, runs npm audit to check for        ║
+║ vulnerabilities. If found:                       ║
+║   1. npm audit fix                               ║
+║   2. npm install (only if files changed)         ║
+║   3. npm run build (as before)                   ║
+╠══════════════════════════════════════════════════╣
+║ No server changes needed — deploy & test!        ║
+╚══════════════════════════════════════════════════╝
+```
+
+No new env vars, permissions, or server changes are required. The update only adds code logic to the existing deploy file.
+
+---
+
 ## Gotchas & Lessons Learned
 
 These are hard-won lessons from production debugging. **Do not skip these.**
@@ -974,3 +1264,18 @@ If the project uses TypeScript, the build **must succeed** before reloading PM2.
 - `npm ci` = **deterministic**, deletes `node_modules` and installs from lock file. Faster and safer for CI/CD.
 - `npm install` = resolves dependencies, may update lock file. Not suitable for automated deploys.
 Always use `npm ci` (or equivalent frozen-lockfile flag) in deploy webhooks.
+
+### Shared (both stacks)
+
+#### 14. `npm audit fix` in deploy context
+After `npm ci` (or equivalent install), the deploy runs `npm audit` to check for known vulnerabilities. If vulnerabilities are found (`npm audit` returns non-zero exit code), the deploy automatically runs:
+1. `npm audit fix` — attempts to patch vulnerable dependencies
+2. **Checks if `package.json` or the lockfile was actually modified** (via `md5_file` in PHP, content comparison in Node.js)
+3. Only if files changed: `npm install` — reinstalls with the updated dependencies
+4. Then proceeds to `npm run build` as normal
+
+**Important caveats:**
+- The fix modifies `package.json` and `package-lock.json` locally on the server, but these changes are **NOT committed**. The next `git pull` will overwrite them. This is intentional — it provides an immediate security patch while the developer pushes a proper fix.
+- Only npm and pnpm support `audit fix`. For yarn and bun, the audit block is omitted.
+- `npm audit` may report vulnerabilities that `audit fix` can't resolve (major version bumps required). In that case, `package.json`/lockfile won't change, so the reinstall is skipped — no wasted time.
+- For composer (Laravel), dependency install already runs conditionally when `composer.json` or `composer.lock` change in the git pull (see step 4 of the Laravel template).

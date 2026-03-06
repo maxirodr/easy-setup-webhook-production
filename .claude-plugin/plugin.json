@@ -1,6 +1,6 @@
 {
   "name": "easy-setup-webhook-production",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Add a secure deploy webhook endpoint to any Laravel or Node.js (Express + PM2) backend + frontend (React, Next.js, Vue, etc.) project. Use when asked to 'add deploy webhook', 'deploy endpoint', 'auto deploy', 'setup PM2 deploy', 'webhook para deployar', or similar. Implements git pull + conditional builds with security (throttle, ban, token validation) and battle-tested gotchas.",
   "author": "maxirodr",
   "license": "MIT",
